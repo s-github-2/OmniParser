@@ -1,0 +1,8 @@
+# Always use LF for all text files
+* text eol=lf
+
+# Optionally specify binary files explicitly
+*.png binary
+*.jpg binary
+*.exe binary
+*.dll binary

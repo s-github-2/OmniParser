@@ -20,15 +20,18 @@ from matplotlib import pyplot as plt
 import easyocr
 from paddleocr import PaddleOCR
 reader = easyocr.Reader(['en'])
+# PaddleOCR v3 initialization
+# Note: In v3, show_log is not a constructor parameter, use_gpu renamed to device,
+# use_angle_cls renamed to use_textline_orientation
+# det, rec, cls parameters are no longer in constructor - models are auto-enabled
 paddle_ocr = PaddleOCR(
-    lang='en',  # other lang also available
-    use_angle_cls=False,
-    use_gpu=False,  # using cuda will conflict with pytorch in the same process
-    show_log=False,
-    max_batch_size=1024,
-    use_dilation=True,  # improves accuracy
-    det_db_score_mode='slow',  # improves accuracy
-    rec_batch_num=1024)
+    lang='en',
+    use_textline_orientation=False,
+    device='cpu',  # 'cpu' or 'gpu' - using CPU to avoid conflicts with PyTorch
+    # use_dilation and det_db_score_mode may need to be set via text_det parameters
+    # rec_batch_num is now text_recognition_batch_size
+    text_recognition_batch_size=1024
+)
 import time
 import base64
 
@@ -62,9 +65,9 @@ def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2
         from transformers import AutoProcessor, AutoModelForCausalLM 
         processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
         if device == 'cpu':
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float32, trust_remote_code=True)
+            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float32, trust_remote_code=True, attn_implementation="eager")
         else:
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float16, trust_remote_code=True).to(device)
+            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float16, trust_remote_code=True, attn_implementation="eager").to(device)
     return {'model': model.to(device), 'processor': processor}
 
 
@@ -96,7 +99,7 @@ def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_
 
     model, processor = caption_model_processor['model'], caption_model_processor['processor']
     if not prompt:
-        if 'florence' in model.config.name_or_path:
+        if 'florence' in model.config.model_type.lower() or 'florence' in str(type(model)).lower():
             prompt = "<CAPTION>"
         else:
             prompt = "The image shows"
@@ -111,8 +114,20 @@ def get_parsed_content_icon(filtered_boxes, starting_idx, image_source, caption_
             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt", do_resize=False).to(device=device, dtype=torch.float16)
         else:
             inputs = processor(images=batch, text=[prompt]*len(batch), return_tensors="pt").to(device=device)
-        if 'florence' in model.config.name_or_path:
-            generated_ids = model.generate(input_ids=inputs["input_ids"],pixel_values=inputs["pixel_values"],max_new_tokens=20,num_beams=1, do_sample=False)
+        
+        # Check if this is Florence-2 model
+        is_florence = 'florence' in model.config.model_type.lower() or 'florence' in str(type(model)).lower()
+        
+        if is_florence:
+            # Florence-2 specific generation with fixed parameters
+            generated_ids = model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=20,
+                num_beams=1,
+                do_sample=False,
+                use_cache=False  # Disable cache to avoid shape issues
+            )
         else:
             generated_ids = model.generate(**inputs, max_length=100, num_beams=5, no_repeat_ngram_size=2, early_stopping=True, num_return_sequences=1) # temperature=0.01, do_sample=True,
         generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)
@@ -514,9 +529,33 @@ def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, out
             text_threshold = 0.5
         else:
             text_threshold = easyocr_args['text_threshold']
-        result = paddle_ocr.ocr(image_np, cls=False)[0]
-        coord = [item[0] for item in result if item[1][1] > text_threshold]
-        text = [item[1][0] for item in result if item[1][1] > text_threshold]
+        # PaddleOCR v3: Use predict() instead of ocr(), no cls parameter
+        # Result format changed: returns list of OCRResult objects
+        result_list = paddle_ocr.predict(image_np)
+        
+        # Handle None or empty result
+        if not result_list or result_list[0] is None:
+            coord = []
+            text = []
+        else:
+            ocr_result = result_list[0]
+            # PaddleOCR v3: Access results from OCRResult object
+            # rec_polys: list of polygons (4 points each)
+            # rec_texts: list of recognized texts
+            # rec_scores: list of confidence scores
+            rec_polys = ocr_result['rec_polys']
+            rec_texts = ocr_result['rec_texts']
+            rec_scores = ocr_result['rec_scores']
+            
+            # Filter by threshold and convert polygon format
+            coord = []
+            text = []
+            for poly, txt, score in zip(rec_polys, rec_texts, rec_scores):
+                if score > text_threshold:
+                    # Convert from numpy array polygon (4 points) to list format
+                    # poly is shape (4, 2) with [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                    coord.append(poly.tolist())
+                    text.append(txt)
     else:  # EasyOCR
         if easyocr_args is None:
             easyocr_args = {}
