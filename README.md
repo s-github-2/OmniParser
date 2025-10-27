@@ -1,3 +1,10 @@
+# Notes for this branch
+This branch fixed issues related to running this on a) Windows b) using latest paddleocr >3.0 which has changes in API breaking OmniParser integration
+The notebook demo.ipynb now runs. 
+New files MIGRATION_NOTES.md and MIGRATION_SUMMARY.md lists changes that were made to make running on windows with paddleocr > 3.o 
+3 test files test_full_pipline, test_migration, test_paddleocr_v3 were added
+
+
 # OmniParser: Screen Parsing tool for Pure Vision Based GUI Agent
 
 <p align="center">
